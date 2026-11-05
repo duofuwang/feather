@@ -1,0 +1,139 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Upstream ref to build (empty = latest release tag)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: nightly
+          fetch-depth: 0
+
+      - name: Sync nightly from upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/claration/feather.git
+          git fetch upstream main --tags
+
+          if [ -n "${{ github.event.inputs.source }}" ]; then
+            REF="${{ github.event.inputs.source }}"
+          else
+            REF=$(git describe --tags --abbrev=0 FETCH_HEAD)
+          fi
+
+          echo "syncing to $REF"
+          git reset --hard "$REF"
+          git checkout "${{ github.sha }}" -- .github/
+          git add -A
+          git commit -m "chore: sync nightly with upstream $REF ($(date -u +%Y-%m-%d))" --allow-empty
+          git push --force origin nightly
+
+  build:
+    needs: sync
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: nightly
+          submodules: 'true'
+
+      - name: Select Xcode
+        run: |
+          if [ -d /Applications/Xcode_26.3.0.app ]; then
+            sudo xcode-select -s /Applications/Xcode_26.3.0.app
+          else
+            sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          fi
+          xcodebuild -version
+
+      - name: Expose entitlements editor
+        run: |
+          python3 - <<'PY'
+          import pathlib
+
+          targets = [
+              "Feather/Views/Signing/SigningView.swift",
+              "Feather/Views/Signing/BulkSigningView.swift",
+          ]
+
+          for name in targets:
+              path = pathlib.Path(name)
+              if not path.exists():
+                  print(f"skip {name} (not present)")
+                  continue
+              lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+              out = []
+              i = 0
+              removed = 0
+              while i < len(lines):
+                  if lines[i].strip() == "#if NIGHTLY || DEBUG":
+                      j = i + 1
+                      while j < len(lines) and lines[j].strip() != "#endif":
+                          j += 1
+                      block = "".join(lines[i + 1:j])
+                      if "SigningEntitlementsView" in block:
+                          out.extend(lines[i + 1:j])
+                          i = j + 1
+                          removed += 1
+                          continue
+                  out.append(lines[i])
+                  i += 1
+              path.write_text("".join(out), encoding="utf-8")
+              print(f"{name}: removed {removed} guard(s)")
+          PY
+
+      - name: Compile Feather
+        run: |
+          agvtool new-version -all $(git rev-parse HEAD)
+          make iphoneos
+          mkdir -p upload
+          mv packages/* upload/
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          VER=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" _build/Payload/Feather.app/Info.plist)
+          MAX=$(git ls-remote --tags origin "v${VER}-*" \
+            | sed 's#.*refs/tags/##' \
+            | sed "s#^v${VER}-##" \
+            | grep -E '^[0-9]+$' | sort -n | tail -1)
+          N=$(( ${MAX:-0} + 1 ))
+          echo "tag=v${VER}-${N}" >> $GITHUB_OUTPUT
+          echo "resolved: v${VER}-${N} (previous max: ${MAX:-none})"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feather-nightly-ipa
+          path: upload/*
+          if-no-files-found: error
+
+      - name: Publish nightly release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Feather ${{ steps.tag.outputs.tag }}
+          prerelease: false
+          files: |
+            upload/*
+          fail_on_unmatched_files: true
+          draft: false
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

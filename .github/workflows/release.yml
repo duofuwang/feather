@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - v*
+  schedule:
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -46,12 +48,26 @@ jobs:
           path: upload/*
           if-no-files-found: error
 
+      - name: Resolve release target
+        id: rel
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "tag=nightly" >> $GITHUB_OUTPUT
+            echo "name=Feather nightly $(date -u +%Y-%m-%d)" >> $GITHUB_OUTPUT
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+            echo "name=Feather ${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create Release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name != 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          name: Feather ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: ${{ steps.rel.outputs.name }}
+          prerelease: ${{ steps.rel.outputs.prerelease == 'true' }}
           files: |
             upload/*
           generate_release_notes: true

@@ -51,7 +51,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Feather v${{ env.VERSION }}
-          tag_name: v${{ env.VERSION }}
+          tag_name: ${{ github.ref_name }}
           files: |
             upload/*
           generate_release_notes: true

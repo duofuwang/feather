@@ -10,6 +10,10 @@ on:
         description: 'Upstream ref to build (empty = upstream main)'
         required: false
         default: ''
+      force:
+        description: 'Build even when nothing changed'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -17,6 +21,8 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,6 +31,7 @@ jobs:
           fetch-depth: 0
 
       - name: Sync nightly from upstream
+        id: detect
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -38,14 +45,37 @@ jobs:
           fi
 
           echo "syncing to $REF (upstream/main by default)"
+
+          # Remember the current nightly tip before reset --hard moves HEAD.
+          PREV_HEAD=$(git rev-parse HEAD)
+          TARGET=$(git rev-parse "${REF}^{commit}" 2>/dev/null || echo "$REF")
+          FORCE="${{ github.event.inputs.force }}"
+
           git reset --hard "$REF"
           git checkout "${{ github.sha }}" -- .github/
           git add -A
+
+          # Compare the tree we are about to commit against the current nightly
+          # tree. If upstream sources and our .github/ are both unchanged there
+          # is nothing new to compile, so skip the macOS build entirely.
+          # Comparing trees (not HEAD^) stays correct even when extra commits,
+          # like workflow edits, are pushed onto the nightly branch.
+          NEW_TREE=$(git write-tree)
+          OLD_TREE=$(git rev-parse "${PREV_HEAD}^{tree}")
+          if [ "$FORCE" != "true" ] && [ "$NEW_TREE" = "$OLD_TREE" ]; then
+            echo "unchanged at $TARGET (tree $NEW_TREE); skipping sync and build"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "changed=true (target=$TARGET, tree $OLD_TREE -> $NEW_TREE, force=${FORCE:-false})"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
           git commit -m "chore: sync nightly with upstream $REF ($(date -u +%Y-%m-%d))" --allow-empty
           git push --force origin nightly
 
   build:
     needs: sync
+    if: needs.sync.outputs.changed == 'true'
     runs-on: macos-latest
     steps:
       - name: Checkout

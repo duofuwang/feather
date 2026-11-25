@@ -52,6 +52,11 @@ jobs:
           FORCE="${{ github.event.inputs.force }}"
 
           git reset --hard "$REF"
+          # checkout only restores paths that exist in that commit, so anything
+          # upstream added under .github/ would survive and end up in our commit.
+          # Pushing any .github/workflows change is rejected for the Actions
+          # token (no `workflows` permission), so start from an empty .github.
+          rm -rf .github
           git checkout "${{ github.sha }}" -- .github/
           git add -A
 
